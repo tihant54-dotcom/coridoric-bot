@@ -12,6 +12,7 @@ from telegram.constants import ParseMode
 import aiohttp
 
 import config
+from proxy_manager import init_proxies, proxy_mgr
 from parser import fetch_fonbet, fetch_maxline, match_and_build, SPORT_IDS
 
 logging.basicConfig(
@@ -452,12 +453,46 @@ async def auto_notify_job(ctx: ContextTypes.DEFAULT_TYPE):
             AUTO_USERS.pop(uid, None)
 
 
+
+async def cmd_proxy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Показывает статус прокси и позволяет перепроверить."""
+    st = proxy_mgr.status()
+    text = (
+        "🌐 <b>Статус прокси</b>\n\n"
+        f"Всего в списке: <b>{st['total']}</b>\n"
+        f"Рабочих: <b>{st['working']}</b>\n"
+        f"Активных: <b>{st['active']}</b>\n"
+        f"Заблокированных: <b>{st['dead']}</b>\n\n"
+    )
+    if st['total'] == 0:
+        text += "⚠️ Список прокси пуст.\nДобавь прокси в файл <code>proxy_list.py</code>"
+    elif st['active'] == 0:
+        text += "❌ Нет рабочих прокси.\nИспользуется прямое соединение."
+    else:
+        text += f"✅ Используется прямое соединение через {st['active']} прокси"
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Перепроверить прокси", callback_data="recheck_proxy"),
+        InlineKeyboardButton("◀️ Меню", callback_data="main"),
+    ]])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
 # ─────────────────────────────────────────────────────────
 #  ЗАПУСК
 # ─────────────────────────────────────────────────────────
 
+async def post_init(app):
+    """Инициализация прокси при старте бота."""
+    cnt = await init_proxies()
+    st = proxy_mgr.status()
+    if cnt > 0:
+        log.info(f"Прокси: {cnt} рабочих из {st['total']}")
+    else:
+        log.info("Прокси не настроены — используем прямое соединение")
+
+
 def main():
-    app = Application.builder().token(config.BOT_TOKEN).build()
+    app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("help",       cmd_help))
@@ -468,6 +503,7 @@ def main():
     app.add_handler(CommandHandler("hockey",     cmd_sport))
     app.add_handler(CommandHandler("tennis",     cmd_sport))
     app.add_handler(CommandHandler("volleyball", cmd_sport))
+    app.add_handler(CommandHandler("proxy",       cmd_proxy))
     app.add_handler(CallbackQueryHandler(on_callback))
 
     # Проверяем каждую минуту

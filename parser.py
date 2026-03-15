@@ -1,11 +1,10 @@
 """
-parser.py — реальный парсер котировок Fonbet.by + Maxline.by
+parser.py — парсер котировок Fonbet.by + Maxline.by с поддержкой прокси
 """
 
-import asyncio
 import logging
 import re
-import aiohttp
+from proxy_manager import fetch_with_proxy
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +32,8 @@ SPORT_IDS = {
 #  FONBET.BY
 # ─────────────────────────────────────────────────────────
 
-async def fetch_fonbet(session: aiohttp.ClientSession, sport: str) -> list[dict]:
+async def fetch_fonbet(_, sport: str) -> list[dict]:
+    """Парсит прематч и лайв с Fonbet.by через прокси."""
     sid = SPORT_IDS[sport]["fn"]
     lines = []
 
@@ -44,42 +44,39 @@ async def fetch_fonbet(session: aiohttp.ClientSession, sport: str) -> list[dict]
 
     for url, is_live in endpoints:
         try:
-            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=12)) as r:
-                if r.status != 200:
+            data = await fetch_with_proxy(url, HEADERS)
+            events = data.get("events") or data.get("data") or []
+
+            for ev in events:
+                home = ev.get("team1") or ev.get("teamHome") or ev.get("home") or ""
+                away = ev.get("team2") or ev.get("teamAway") or ev.get("away") or ""
+                if not home or not away:
                     continue
-                data = await r.json(content_type=None)
-                events = data.get("events") or data.get("data") or []
 
-                for ev in events:
-                    home = ev.get("team1") or ev.get("teamHome") or ev.get("home") or ""
-                    away = ev.get("team2") or ev.get("teamAway") or ev.get("away") or ""
-                    if not home or not away:
-                        continue
+                league = ""
+                t = ev.get("tournament")
+                if isinstance(t, dict):
+                    league = t.get("name", "")
+                else:
+                    league = ev.get("leagueName") or ev.get("league") or str(t or "")
 
-                    league = ""
-                    t = ev.get("tournament")
-                    if isinstance(t, dict):
-                        league = t.get("name", "")
-                    else:
-                        league = ev.get("leagueName") or ev.get("league") or str(t or "")
+                time_str = ev.get("startTime") or ev.get("start") or ev.get("date") or ""
+                markets  = ev.get("markets") or ev.get("factors") or []
 
-                    time_str = ev.get("startTime") or ev.get("start") or ev.get("date") or ""
-                    markets = ev.get("markets") or ev.get("factors") or []
-
-                    for total, over, under in _extract_totals(markets):
-                        lines.append({
-                            "book": "fonbet",
-                            "home": home.strip(), "away": away.strip(),
-                            "league": league.strip(),
-                            "time": _fmt_time(time_str),
-                            "is_live": is_live,
-                            "total": total, "over": over, "under": under,
-                        })
+                for total, over, under in _extract_totals(markets):
+                    lines.append({
+                        "book": "fonbet",
+                        "home": home.strip(), "away": away.strip(),
+                        "league": league.strip(),
+                        "time": _fmt_time(time_str),
+                        "is_live": is_live,
+                        "total": total, "over": over, "under": under,
+                    })
 
         except Exception as e:
             log.warning(f"[Fonbet/{sport}] {e}")
 
-    log.info(f"[Fonbet/{sport}] {len(lines)} total lines")
+    log.info(f"[Fonbet/{sport}] {len(lines)} линий")
     return lines
 
 
@@ -87,7 +84,8 @@ async def fetch_fonbet(session: aiohttp.ClientSession, sport: str) -> list[dict]
 #  MAXLINE.BY
 # ─────────────────────────────────────────────────────────
 
-async def fetch_maxline(session: aiohttp.ClientSession, sport: str) -> list[dict]:
+async def fetch_maxline(_, sport: str) -> list[dict]:
+    """Парсит прематч и лайв с Maxline.by через прокси."""
     sid = SPORT_IDS[sport]["ml"]
     lines = []
 
@@ -98,46 +96,43 @@ async def fetch_maxline(session: aiohttp.ClientSession, sport: str) -> list[dict
 
     for url, is_live in endpoints:
         try:
-            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=12)) as r:
-                if r.status != 200:
-                    continue
-                data = await r.json(content_type=None)
-                events = (
-                    data.get("events") or data.get("rows") or
-                    data.get("items") or data.get("data") or
-                    (data if isinstance(data, list) else [])
+            data = await fetch_with_proxy(url, HEADERS)
+            events = (
+                data.get("events") or data.get("rows") or
+                data.get("items") or data.get("data") or
+                (data if isinstance(data, list) else [])
+            )
+
+            for ev in events:
+                home = (
+                    ev.get("team1Name") or ev.get("teamName1") or
+                    ev.get("home") or ev.get("homeTeam") or ""
                 )
+                away = (
+                    ev.get("team2Name") or ev.get("teamName2") or
+                    ev.get("away") or ev.get("awayTeam") or ""
+                )
+                if not home or not away:
+                    continue
 
-                for ev in events:
-                    home = (
-                        ev.get("team1Name") or ev.get("teamName1") or
-                        ev.get("home") or ev.get("homeTeam") or ""
-                    )
-                    away = (
-                        ev.get("team2Name") or ev.get("teamName2") or
-                        ev.get("away") or ev.get("awayTeam") or ""
-                    )
-                    if not home or not away:
-                        continue
+                league   = ev.get("leagueName") or ev.get("league") or ev.get("tournament") or ""
+                time_str = ev.get("startTime") or ev.get("date") or ev.get("start") or ""
+                markets  = ev.get("markets") or ev.get("bets") or ev.get("groups") or []
 
-                    league  = ev.get("leagueName") or ev.get("league") or ev.get("tournament") or ""
-                    time_str = ev.get("startTime") or ev.get("date") or ev.get("start") or ""
-                    markets  = ev.get("markets") or ev.get("bets") or ev.get("groups") or []
-
-                    for total, over, under in _extract_totals(markets):
-                        lines.append({
-                            "book": "maxline",
-                            "home": home.strip(), "away": away.strip(),
-                            "league": league.strip(),
-                            "time": _fmt_time(time_str),
-                            "is_live": is_live,
-                            "total": total, "over": over, "under": under,
-                        })
+                for total, over, under in _extract_totals(markets):
+                    lines.append({
+                        "book": "maxline",
+                        "home": home.strip(), "away": away.strip(),
+                        "league": league.strip(),
+                        "time": _fmt_time(time_str),
+                        "is_live": is_live,
+                        "total": total, "over": over, "under": under,
+                    })
 
         except Exception as e:
-            log.warning(f"[Maxline/{sport}/{url[-20:]}] {e}")
+            log.warning(f"[Maxline/{sport}] {e}")
 
-    log.info(f"[Maxline/{sport}] {len(lines)} total lines")
+    log.info(f"[Maxline/{sport}] {len(lines)} линий")
     return lines
 
 
@@ -178,13 +173,13 @@ def _extract_totals(markets: list) -> list[tuple[float, float, float]]:
                 n in ("б", "o", "over", "больше") or
                 n.startswith("over") or
                 n.startswith("б(") or n.startswith("б ") or
-                (re.match(r"^б[\s\d(]", n) is not None)
+                bool(re.match(r"^б[\s\d(]", n))
             )
             is_u = (
                 n in ("м", "u", "under", "меньше") or
                 n.startswith("under") or
                 n.startswith("м(") or n.startswith("м ") or
-                (re.match(r"^м[\s\d(]", n) is not None)
+                bool(re.match(r"^м[\s\d(]", n))
             )
 
             if is_o:
@@ -196,7 +191,6 @@ def _extract_totals(markets: list) -> list[tuple[float, float, float]]:
                 if param > 0 and not tval:
                     tval = param
 
-        # Параметр тотала иногда в самом маркете
         if not tval:
             p = abs(_f(m.get("param") or m.get("total") or m.get("handicap") or 0))
             if p > 0:
@@ -247,29 +241,25 @@ def _sim(a: str, b: str) -> float:
     wb = set(w for w in _norm(b).split() if len(w) > 1)
     if not wa or not wb:
         return 0.0
-    inter = len(wa & wb)
-    return inter / max(len(wa), len(wb))
+    return len(wa & wb) / max(len(wa), len(wb))
 
 
 def match_and_build(fn_lines: list, ml_lines: list) -> list[dict]:
-    """Сопоставляет линии Fonbet и Maxline, считает коридоры."""
     events = []
     used_ml = set()
 
     for fn in fn_lines:
-        best_ml  = None
-        best_sc  = 0.0
+        best_ml = None
+        best_sc = 0.0
         best_idx = -1
 
         for idx, ml in enumerate(ml_lines):
             if idx in used_ml:
                 continue
-            sh = _sim(fn["home"], ml["home"])
-            sa = _sim(fn["away"], ml["away"])
-            sc = (sh + sa) / 2
+            sc = (_sim(fn["home"], ml["home"]) + _sim(fn["away"], ml["away"])) / 2
             if sc > best_sc:
-                best_sc  = sc
-                best_ml  = ml
+                best_sc = sc
+                best_ml = ml
                 best_idx = idx
 
         if not best_ml or best_sc < 0.5:
@@ -284,14 +274,10 @@ def match_and_build(fn_lines: list, ml_lines: list) -> list[dict]:
             "league":   fn["league"] or best_ml["league"],
             "time":     fn["time"]   or best_ml["time"],
             "is_live":  fn["is_live"] or best_ml["is_live"],
-            "fn_total": fn["total"],
-            "fn_over":  fn["over"],
-            "fn_under": fn["under"],
-            "ml_total": best_ml["total"],
-            "ml_over":  best_ml["over"],
-            "ml_under": best_ml["under"],
+            "fn_total": fn["total"], "fn_over": fn["over"], "fn_under": fn["under"],
+            "ml_total": best_ml["total"], "ml_over": best_ml["over"], "ml_under": best_ml["under"],
             "match_sc": round(best_sc, 2),
-            "cors":     cors,
+            "cors": cors,
         })
 
     return events
@@ -300,7 +286,6 @@ def match_and_build(fn_lines: list, ml_lines: list) -> list[dict]:
 def _calc_corridors(fn: dict, ml: dict) -> list[dict]:
     cors = []
 
-    # A: Fonbet Б + Maxline М (ml_total > fn_total)
     if ml["total"] > fn["total"]:
         w   = round(ml["total"] - fn["total"], 3)
         s1  = 100 / fn["over"]
@@ -311,11 +296,9 @@ def _calc_corridors(fn: dict, ml: dict) -> list[dict]:
             "oLine": fn["total"], "oOdds": fn["over"],
             "uBook": "maxline", "uLabel": "Maxline.by",
             "uLine": ml["total"], "uOdds": ml["under"],
-            "width": w, "roi": roi,
-            "s1": round(s1, 1), "s2": round(s2, 1),
+            "width": w, "roi": roi, "s1": round(s1, 1), "s2": round(s2, 1),
         })
 
-    # B: Maxline Б + Fonbet М (fn_total > ml_total)
     if fn["total"] > ml["total"]:
         w   = round(fn["total"] - ml["total"], 3)
         s1  = 100 / ml["over"]
@@ -326,8 +309,7 @@ def _calc_corridors(fn: dict, ml: dict) -> list[dict]:
             "oLine": ml["total"], "oOdds": ml["over"],
             "uBook": "fonbet",  "uLabel": "Fonbet.by",
             "uLine": fn["total"], "uOdds": fn["under"],
-            "width": w, "roi": roi,
-            "s1": round(s1, 1), "s2": round(s2, 1),
+            "width": w, "roi": roi, "s1": round(s1, 1), "s2": round(s2, 1),
         })
 
     return sorted(cors, key=lambda c: -c["width"])
